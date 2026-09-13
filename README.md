@@ -19,11 +19,18 @@ While a set runs you get the phase name, a countdown, the current rep, a puck
 that slides down and back up a track, and a beep on every phase change. Your
 settings are remembered between visits, and the screen is kept awake.
 
-Sound on iPhone: beeps play through media volume even with the ringer on silent.
-Leaving the app pauses the set, and tapping Resume brings back the timer and the
-sound together. If iOS cuts the sound mid-set, the app says so and any tap
-restores it. While a set runs with sound on, other audio such as music may pause;
-turn Sound off to keep your music playing.
+Sound on iPhone has two modes, chosen with the Over my audio switch:
+
+| Over my audio | Beeps in silent mode | Other audio, such as an audiobook |
+| --- | --- | --- |
+| Off | play | pauses during a set |
+| On | muted, so turn silent mode off | keeps playing under the beeps |
+
+With the ringer on, a Focus such as Fitness keeps calls and notifications quiet.
+Web pages can't detect silent mode, so the app shows a reminder when a set starts
+with the switch on. Leaving the app pauses the set, and tapping Resume brings back
+the timer and the sound together. If iOS cuts the sound mid-set, the app says so
+and any tap restores it.
 
 Live: https://jzsharpe.github.io/tempo/
 

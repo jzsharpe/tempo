@@ -28,6 +28,8 @@
   .toggle{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:999px;
     padding:6px 12px;font-size:13px;cursor:pointer}
   .toggle.on{color:var(--text);border-color:var(--accent)}
+  .toggles{display:flex;gap:6px}
+  .toggle:disabled{opacity:.4}
 
   .settings{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px}
   .field{position:relative;overflow:hidden;background:var(--panel);border:1px solid var(--line);
@@ -77,7 +79,10 @@
 <body>
 <header>
   <h1>Tempo</h1>
-  <button id="sound" class="toggle on" type="button">&#128276; Sound on</button>
+  <div class="toggles">
+    <button id="mix" class="toggle" type="button" aria-pressed="false">&#127911; Over my audio</button>
+    <button id="sound" class="toggle on" type="button">&#128276; Sound on</button>
+  </div>
 </header>
 
 <section class="settings">
@@ -125,7 +130,7 @@
   const LEAD = 3; // seconds of "get ready" before the first rep
   const $ = id => document.getElementById(id);
   const repsEl=$('reps'), phaseEl=$('phase'), countEl=$('count'), repEl=$('rep'), barEl=$('bar'),
-        goBtn=$('go'), resetBtn=$('reset'), puck=$('puck'), soundBtn=$('sound'), hintEl=$('hint');
+        goBtn=$('go'), resetBtn=$('reset'), puck=$('puck'), soundBtn=$('sound'), mixBtn=$('mix'), hintEl=$('hint');
   const dEls = [$('d0'), $('d1'), $('d2'), $('d3')];
   const allInputs = [repsEl, ...dEls];
 
@@ -137,9 +142,10 @@
     else if (typeof s.rhythm === 'string')
       (s.rhythm.replace(/\D/g,'') + '0000').slice(0,4).split('').forEach((v,i) => dEls[i].value = v);
     if (s.sound === false) soundBtn.classList.remove('on');
+    if (s.mix === true) mixBtn.classList.add('on');
   } catch(e){}
   const save = () => { try { localStorage.setItem('tempo', JSON.stringify({
-    reps: repsEl.value, durs: dEls.map(e => e.value), sound: soundBtn.classList.contains('on') })); } catch(e){} };
+    reps: repsEl.value, durs: dEls.map(e => e.value), sound: soundBtn.classList.contains('on'), mix: mixBtn.classList.contains('on') })); } catch(e){} };
 
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v) || 0));
   const getReps = () => clamp(parseInt(repsEl.value,10) || 1, 1, 99);
@@ -151,10 +157,19 @@
   //  * leaving the app puts Web Audio into a WebKit-only "interrupted" state that never clears on its own
   //  * audio can only be (re)started inside a tap
   //  * by default web audio is treated like game sounds and muted by silent mode
+  // Two modes, chosen with the "Over my audio" switch:
+  //  * media mode (switch off): works in silent mode, but iOS pauses other audio such as an audiobook
+  //  * mixing mode (switch on): beeps play over other audio, but silent mode mutes them, so the ringer must be on
   const AC = window.AudioContext || window.webkitAudioContext;
   let ctx = null, resumeFailed = false, unlockedAt = 0;
   const soundOn = () => soundBtn.classList.contains('on');
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){}
+  const mixOn = () => mixBtn.classList.contains('on');
+  function applyAudioMode() {
+    try { if (navigator.audioSession) navigator.audioSession.type = mixOn() ? 'ambient' : 'playback'; } catch(e){}
+    mixBtn.setAttribute('aria-pressed', String(mixOn()));
+    mixBtn.disabled = !soundOn();
+  }
+  applyAudioMode();
 
   // A looping silent track keeps iOS in media-playback mode during a set, so silent mode can't mute the beeps.
   let keepAlive = null;
@@ -169,7 +184,7 @@
     a.loop = true; a.setAttribute('playsinline', ''); a.preload = 'auto';
     return a;
   }
-  function keepAliveOn()  { if (!soundOn()) return; try { keepAlive = keepAlive || silentTrack(); const r = keepAlive.play(); if (r) r.catch(()=>{}); } catch(e){} }
+  function keepAliveOn()  { if (!soundOn() || mixOn()) return; try { keepAlive = keepAlive || silentTrack(); const r = keepAlive.play(); if (r) r.catch(()=>{}); } catch(e){} }
   function keepAliveOff() { try { if (keepAlive) keepAlive.pause(); } catch(e){} }
 
   // Call only from a tap. Resumes audio, or rebuilds it if iOS left it stuck.
@@ -221,7 +236,9 @@
         } else soundWarning = false;
       }, 700);
     } else if (!broken && soundWarning) {
-      soundWarning = false; hintEl.style.color = ''; updateHint();
+      soundWarning = false;
+      // only clear our own warning, never another message such as the ringer reminder
+      if (hintEl.textContent.startsWith('Sound interrupted')) { hintEl.style.color = ''; updateHint(); }
     }
   }
   // Any tap anywhere retries audio (touchend/click are the events iOS accepts for this).
@@ -233,10 +250,29 @@
 
   soundBtn.onclick = () => {
     soundBtn.classList.toggle('on');
-    soundBtn.textContent = soundOn() ? '\u{1F514} Sound on' : '\u{1F515} Sound off'; save();
+    soundBtn.textContent = soundOn() ? '\u{1F514} Sound on' : '\u{1F515} Sound off'; save(); applyAudioMode();
     if (soundOn()) { unlockAudio(); if (running) keepAliveOn(); beep(660,0.05,0.15); }
     else { keepAliveOff(); soundWarning = true; soundStatus(); }
   };
+
+  mixBtn.onclick = () => {
+    mixBtn.classList.toggle('on'); save(); applyAudioMode();
+    // switch the audio engine over inside this tap so the new mode takes effect right away
+    if (mixOn()) keepAliveOff();
+    resumeFailed = true; unlockAudio();
+    if (running) keepAliveOn();
+    beep(660,0.05,0.15);
+    if (mixOn()) ringerReminder();
+    else if (!soundWarning) { hintEl.style.color = ''; updateHint(); }
+  };
+
+  // Web pages can't see silent mode, so remind about the ringer whenever mixing mode is used.
+  const RINGER_MSG = 'Over my audio is on \u00b7 turn silent mode off to hear beeps';
+  function ringerReminder() {
+    if (!soundOn() || !mixOn()) return;
+    hintEl.textContent = RINGER_MSG; hintEl.style.color = 'var(--hold)';
+    setTimeout(() => { if (hintEl.textContent === RINGER_MSG) { hintEl.style.color = ''; updateHint(); } }, 4000);
+  }
 
   // ---- wake lock
   let wake = null;
@@ -352,7 +388,7 @@
     allInputs.forEach(el => el.disabled = true);
     goBtn.textContent = 'Pause'; goBtn.classList.add('pause');
     autoPaused = false; soundWarning = false; hintEl.style.color = ''; updateHint();
-    unlockAudio(); keepAliveOn(); keepAwake(true);
+    unlockAudio(); keepAliveOn(); keepAwake(true); ringerReminder();
     cancelAnimationFrame(raf); raf = requestAnimationFrame(draw);
   }
   function pause() {
