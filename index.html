@@ -147,22 +147,96 @@
   const fmt = s => s < 60 ? s + 's' : Math.floor(s/60) + ':' + String(s%60).padStart(2,'0');
 
   // ---- audio
-  let ctx = null;
+  // iOS quirks this block works around:
+  //  * leaving the app puts Web Audio into a WebKit-only "interrupted" state that never clears on its own
+  //  * audio can only be (re)started inside a tap
+  //  * by default web audio is treated like game sounds and muted by silent mode
+  const AC = window.AudioContext || window.webkitAudioContext;
+  let ctx = null, resumeFailed = false, unlockedAt = 0;
   const soundOn = () => soundBtn.classList.contains('on');
-  function beep(freq=880, dur=0.08, vol=0.25) {
-    if (!soundOn()) return;
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){}
+
+  // A looping silent track keeps iOS in media-playback mode during a set, so silent mode can't mute the beeps.
+  let keepAlive = null;
+  function silentTrack() {
+    const rate = 8000, n = rate, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+    const str = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+    str(0,'RIFF'); v.setUint32(4, 36 + n, true); str(8,'WAVE'); str(12,'fmt ');
+    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,rate,true); v.setUint32(28,rate,true); v.setUint16(32,1,true); v.setUint16(34,8,true);
+    str(36,'data'); v.setUint32(40, n, true); new Uint8Array(buf, 44).fill(128);
+    const a = new Audio(URL.createObjectURL(new Blob([buf], {type:'audio/wav'})));
+    a.loop = true; a.setAttribute('playsinline', ''); a.preload = 'auto';
+    return a;
+  }
+  function keepAliveOn()  { if (!soundOn()) return; try { keepAlive = keepAlive || silentTrack(); const r = keepAlive.play(); if (r) r.catch(()=>{}); } catch(e){} }
+  function keepAliveOff() { try { if (keepAlive) keepAlive.pause(); } catch(e){} }
+
+  // Call only from a tap. Resumes audio, or rebuilds it if iOS left it stuck.
+  function unlockAudio() {
+    if (!soundOn() || !AC) return;
     try {
-      ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
-      if (ctx.state === 'suspended') ctx.resume();
-      const o = ctx.createOscillator(), g = ctx.createGain();
+      if (ctx && (ctx.state === 'closed' || ctx.state === 'interrupted' || resumeFailed)) {
+        try { ctx.close(); } catch(e){}
+        ctx = null;
+      }
+      if (!ctx) {
+        const c = ctx = new AC(); resumeFailed = false;
+        c.onstatechange = () => { if (c === ctx) soundStatus(); };
+      }
+      if (ctx.state !== 'running') {
+        const c = ctx, r = c.resume(); if (r) r.catch(()=>{});
+        setTimeout(() => { if (c === ctx && c.state !== 'running') { resumeFailed = true; soundStatus(); } }, 600);
+      }
+      unlockedAt = performance.now();
+      // starting any sound inside the tap fully unlocks output on iOS
+      const src = ctx.createBufferSource(); src.buffer = ctx.createBuffer(1, 1, 22050);
+      src.connect(ctx.destination); src.start(0);
+    } catch(e){ resumeFailed = true; }
+    soundStatus();
+  }
+  function beep(freq=880, dur=0.08, vol=0.25) {
+    if (!soundOn() || !ctx) return;
+    try {
+      // Right after a tap the engine may still be starting: queue the beep, it plays a moment later.
+      // Otherwise never queue on a stalled clock, or every missed beep would fire at once on recovery.
+      if (ctx.state !== 'running' && performance.now() - unlockedAt > 1000) { const r = ctx.resume(); if (r) r.catch(()=>{}); return; }
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime;
       o.type='sine'; o.frequency.value=freq;
-      g.gain.setValueAtTime(vol, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
-      o.connect(g).connect(ctx.destination); o.start(); o.stop(ctx.currentTime + dur);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + dur);
     } catch(e){}
   }
-  soundBtn.onclick = () => { soundBtn.classList.toggle('on');
-    soundBtn.textContent = soundOn() ? '\u{1F514} Sound on' : '\u{1F515} Sound off'; save(); if (soundOn()) beep(660,0.05,0.15); };
+  // If iOS cuts the sound mid-set, say so instead of failing silently.
+  let soundWarning = false;
+  function soundStatus() {
+    const broken = running && soundOn() && (!ctx || ctx.state !== 'running');
+    if (broken && !soundWarning) {
+      soundWarning = true;
+      // give a fresh resume a moment before warning
+      setTimeout(() => {
+        if (running && soundOn() && (!ctx || ctx.state !== 'running')) {
+          hintEl.textContent = 'Sound interrupted · tap anywhere to restore'; hintEl.style.color = 'var(--hold)';
+        } else soundWarning = false;
+      }, 700);
+    } else if (!broken && soundWarning) {
+      soundWarning = false; hintEl.style.color = ''; updateHint();
+    }
+  }
+  // Any tap anywhere retries audio (touchend/click are the events iOS accepts for this).
+  ['touchend', 'click'].forEach(type => document.addEventListener(type, () => {
+    if (!soundOn()) return;
+    if (!ctx || ctx.state !== 'running' || resumeFailed) unlockAudio();
+    if (running) keepAliveOn();
+  }, {capture: true, passive: true}));
+
+  soundBtn.onclick = () => {
+    soundBtn.classList.toggle('on');
+    soundBtn.textContent = soundOn() ? '\u{1F514} Sound on' : '\u{1F515} Sound off'; save();
+    if (soundOn()) { unlockAudio(); if (running) keepAliveOn(); beep(660,0.05,0.15); }
+    else { keepAliveOff(); soundWarning = true; soundStatus(); }
+  };
 
   // ---- wake lock
   let wake = null;
@@ -172,7 +246,15 @@
       else if (!on && wake) { await wake.release(); wake = null; }
     } catch(e){}
   }
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState==='visible' && running) keepAwake(true); });
+
+  // ---- leaving the app pauses the set; tapping Resume brings back the timer and the sound together
+  let autoPaused = false;
+  function leaveApp() { if (running) { pause(); autoPaused = true; } }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') leaveApp();
+    else if (autoPaused) { hintEl.textContent = 'Paused while you were away · tap Resume'; hintEl.style.color = 'var(--hold)'; }
+  });
+  window.addEventListener('pagehide', leaveApp);
 
   // ---- timeline
   let segs = [], total = 0, reps = 8, durs = [1,1,1,4];
@@ -189,6 +271,9 @@
     total = t;
     renderBar();
     if (!started) repEl.innerHTML = `Rep <b>0</b> / ${reps}`;
+    updateHint();
+  }
+  function updateHint() {
     const per = durs.reduce((a,b) => a+b, 0);
     hintEl.textContent = per
       ? `${reps} reps × ${per}s = ${fmt(reps*per)} · seconds per phase, 0 skips one`
@@ -266,14 +351,15 @@
     running = true; resumeAt = performance.now();
     allInputs.forEach(el => el.disabled = true);
     goBtn.textContent = 'Pause'; goBtn.classList.add('pause');
-    keepAwake(true); beep(660,0.05,0.01); // prime audio on the user gesture
+    autoPaused = false; soundWarning = false; hintEl.style.color = ''; updateHint();
+    unlockAudio(); keepAliveOn(); keepAwake(true);
     cancelAnimationFrame(raf); raf = requestAnimationFrame(draw);
   }
   function pause() {
     elapsedBase = elapsed(); running = false; cancelAnimationFrame(raf);
     goBtn.textContent = 'Resume'; goBtn.classList.remove('pause');
     phaseEl.textContent = 'Paused'; phaseEl.style.color = 'var(--muted)';
-    keepAwake(false);
+    keepAliveOff(); keepAwake(false);
   }
   function reset() {
     running = false; started = false; elapsedBase = 0; lastSeg = -1; cancelAnimationFrame(raf);
@@ -281,7 +367,8 @@
     goBtn.textContent = 'Go'; goBtn.classList.remove('pause');
     phaseEl.textContent = 'Ready'; phaseEl.style.color = 'var(--text)';
     countEl.textContent = '–'; countEl.style.color = 'var(--text)';
-    build(); setPuck({phase:-1}, 0); keepAwake(false);
+    autoPaused = false; soundWarning = false; hintEl.style.color = '';
+    build(); setPuck({phase:-1}, 0); keepAliveOff(); keepAwake(false);
   }
   function finish() {
     running = false; started = false; cancelAnimationFrame(raf);
@@ -293,6 +380,8 @@
     [...barEl.children].forEach(el => { el.classList.remove('active'); el.classList.add('done'); el.querySelector('.fill').style.width='100%'; });
     setPuck({phase:-1}, 0); keepAwake(false);
     beep(1046,0.1,0.3); setTimeout(()=>beep(1318,0.15,0.3), 130); setTimeout(()=>beep(1568,0.25,0.3), 280);
+    setTimeout(() => { if (!running) keepAliveOff(); }, 1200);
+    soundWarning = false; hintEl.style.color = ''; updateHint();
   }
 
   goBtn.onclick = () => running ? pause() : start();
