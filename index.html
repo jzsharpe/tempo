@@ -135,8 +135,17 @@
   const allInputs = [repsEl, ...dEls];
 
   // ---- settings persistence (migrates the old 4-digit rhythm string)
+  // When embedded (e.g. the Tempo tab in Julia's Training), iOS treats this
+  // page's storage as third-party and wipes it, so the host app keeps the
+  // settings instead: it passes them back in the URL hash (#s=…) and we post
+  // every change up to it.
+  const embedded = window.parent !== window;
+  const fromHash = () => {
+    const m = location.hash.match(/^#s=(.*)$/);
+    return m ? decodeURIComponent(m[1]) : null;
+  };
   try {
-    const s = JSON.parse(localStorage.getItem('tempo') || '{}');
+    const s = JSON.parse(fromHash() || localStorage.getItem('tempo') || '{}');
     if (s.reps) repsEl.value = s.reps;
     if (Array.isArray(s.durs)) s.durs.forEach((v,i) => { if (dEls[i] && v !== '' && v != null) dEls[i].value = v; });
     else if (typeof s.rhythm === 'string')
@@ -144,8 +153,11 @@
     if (s.sound === false) soundBtn.classList.remove('on');
     if (s.mix === true) mixBtn.classList.add('on');
   } catch(e){}
-  const save = () => { try { localStorage.setItem('tempo', JSON.stringify({
-    reps: repsEl.value, durs: dEls.map(e => e.value), sound: soundBtn.classList.contains('on'), mix: mixBtn.classList.contains('on') })); } catch(e){} };
+  const save = () => {
+    const s = { reps: repsEl.value, durs: dEls.map(e => e.value), sound: soundBtn.classList.contains('on'), mix: mixBtn.classList.contains('on') };
+    try { localStorage.setItem('tempo', JSON.stringify(s)); } catch(e){}
+    if (embedded) try { window.parent.postMessage({ type: 'tempo-settings', settings: s }, '*'); } catch(e){}
+  };
 
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(v) || 0));
   const getReps = () => clamp(parseInt(repsEl.value,10) || 1, 1, 99);
